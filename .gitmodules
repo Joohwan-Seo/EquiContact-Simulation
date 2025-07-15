@@ -1,3 +1,6 @@
 [submodule "external/robosuite"]
 	path = external/robosuite
 	url = https://github.com/HorowitzManipulationLab/robosuite
+[submodule "external/robosuite_models"]
+	path = external/robosuite_models
+	url = https://github.com/HorowitzManipulationLab/robosuite_models
