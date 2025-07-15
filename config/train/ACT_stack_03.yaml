@@ -1,0 +1,42 @@
+env_parameters:
+  env_name: "StackCustom"
+  robots: ["Indy7"]
+  controller: "config/controller/indy7_absolute_pose.json"
+  prehensile: False
+  camera_names: ["robot0_eye_in_hand_back", "agentview", "robot0_eye_in_hand"] # To be contained in the raw dataset
+  camera_heights: 256
+  camera_widths: 256
+  camera_depths: False
+  control_freq: 20
+  seed: 0
+  max_iter: 1000
+  fix_initial_cube_pose: False
+
+
+task_parameters:
+  num_episodes : 50
+  episode_len: 250
+  raw_dataset_dir: "data_collection/datasets/stack"
+  processed_dataset_dir: "data_collection/datasets/stack/GCEV_relative_random_noise_reference"
+  ckpt_dir: "act/ckpt/stack/random_goal_random_init_s_GCEV_a_relative_random_ref_stage_0"
+  camera_names: ["robot0_eye_in_hand", "robot0_eye_in_hand_back"] # To be contained in the processed dataset
+  stage: 0
+  state_category: "GCEV"
+  action_category: "relative"
+  state_dim : 6
+  action_dim : 7
+  noisy_reference : True
+  noisy_reference_type : "random" # "fixed" or "random"
+
+eval_parameters:
+  num_episodes : 50
+  episode_len: 350
+  ckpt_dir: "act/ckpt/stack/random_goal_random_init_s_GCEV_a_relative_random_ref_stage_0"
+  camera_names: ["robot0_eye_in_hand", "robot0_eye_in_hand_back"] # To be contained in the processed dataset
+  stage: 0
+  state_category: "GCEV"
+  action_category: "relative"
+  state_dim : 6
+  action_dim : 7
+  noisy_reference : True
+  noisy_reference_type : "fixed" # "fixed" or "random"
