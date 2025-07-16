@@ -14,29 +14,29 @@ env_parameters:
 
 
 task_parameters:
-  num_episodes : 100
+  num_episodes : 50
   episode_len: 250
   raw_dataset_dir: "data_collection/datasets/stack"
   processed_dataset_dir: "data_collection/datasets/stack/s_GCEV_a_relative_fixed_random_noise"
   ckpt_dir: "act/ckpt/stack/s_GCEV_a_relative_fixed_random_noise_stage_0"
   camera_names: ["robot0_eye_in_hand", "robot0_eye_in_hand_back"] # To be contained in the processed dataset
   stage: 0
-  state_category: "GCEV"
-  action_category: "relative_fixed"
+  state_category: ["GCEV"]
+  action_category: ["relative_fixed", "gripper"]
   state_dim : 6
   action_dim : 7
   noisy_reference : True
   noisy_reference_type : "random" # "fixed" or "random"
   num_queries: 40
-
+  
 eval_parameters:
   num_episodes : 50
   episode_len: 350
   ckpt_dir: "act/ckpt/stack/s_GCEV_a_relative_fixed_random_noise_stage_0"
   camera_names: ["robot0_eye_in_hand", "robot0_eye_in_hand_back"] # To be contained in the processed dataset
   stage: 0
-  state_category: "GCEV"
-  action_category: "relative_fixed"
+  state_category: ["GCEV"]
+  action_category: ["relative_fixed", "gripper"]
   state_dim : 6
   action_dim : 7
   noisy_reference : True

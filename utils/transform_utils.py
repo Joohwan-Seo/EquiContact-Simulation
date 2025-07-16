@@ -91,7 +91,63 @@ def SE3_exp_map(xi):
     g = expm(xi_hat)
 
     return g
-     
+
+def quat_to_rot6d(quat):
+    """Convert quaternion to 6D rotation representation.
+    Args:
+        quat (np.array): quaternion in wxyz format
+    Returns:
+        np.array: 6D rotation representation
+    """
+    r = R.from_quat(quat).as_matrix()
+
+    return r[:3, :2].T.flatten()
+
+def rotm_to_rot6d(rotm):
+    return rotm[:3, :2].T.flatten()
+
+def rotvec_to_rot6d(rotvec):
+    r = R.from_rotvec(rotvec).as_matrix()
+
+    return r[:3, :2].T.flatten()
+
+def rot6d_to_quat(rot6d):
+    """Convert 6D rotation representation to quaternion.
+    Args:
+        rot6d (np.array): 6D rotation representation
+    """
+    x_raw = rot6d[:3]
+    y_raw = rot6d[3:]
+    x = x_raw / np.linalg.norm(x_raw)
+    z = np.cross(x, y_raw)
+    z = z / np.linalg.norm(z)
+    y = np.cross(z, x)
+    print(f"x: {x}, y: {y}, z: {z}")
+    quat = R.from_matrix(np.column_stack((x, y, z))).as_quat()
+    
+    return quat
+
+def rot6d_to_rotm(rot6d):
+    """Convert 6D rotation representation to rotation matrix.
+    Args:
+        rot6d (np.array): 6D rotation representation
+    """
+    x_raw = rot6d[:3]
+    y_raw = rot6d[3:]
+    x = x_raw / np.linalg.norm(x_raw)
+    z = np.cross(x, y_raw)
+    z = z / np.linalg.norm(z)
+    y = np.cross(z, x)
+
+    return np.column_stack((x, y, z))
+
+def rot6d_to_rotvec(rot6d):
+    """Convert 6D rotation representation to rotation vector.
+    Args:
+        rot6d (np.array): 6D rotation representation
+    """
+    rotm = rot6d_to_rotm(rot6d)
+    return R.from_matrix(rotm).as_rotvec()     
 
 
 if __name__ == "__main__":

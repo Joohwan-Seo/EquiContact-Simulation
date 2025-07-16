@@ -12,7 +12,7 @@ import time
 
 import os
 
-from utils.transform_utils import hat_map, vee_map
+from utils.transform_utils import *
 
 def main(args):
     # Get config
@@ -30,6 +30,10 @@ def main(args):
     noisy_reference = task_config['noisy_reference']
     noisy_reference_type = task_config['noisy_reference_type']
 
+    num_queries = task_config['num_queries']
+    state_dim = task_config['state_dim']
+    action_dim = task_config['action_dim']
+
     target_stage = task_config['stage']
 
     camera_names = task_config['camera_names']
@@ -41,17 +45,12 @@ def main(args):
         data_dict = {
             '/observations/state': [],
             '/action': [],
+            '/is_padded': []
         }
         for cam_name in camera_names:
             data_dict[f'/observations/images/{cam_name}'] = []
 
-        obs = rollouts['observations']
-        actions = rollouts['actions']
-        stages = rollouts['stage']
-        target_stage = task_config['stage']
-
-        # print(target_stage)
-
+        # Get the indices of the frames where the stage is target_stage
         if target_stage == ("whole" or "Whole"):
             # print("whole")
             target_stage = stages
@@ -61,16 +60,24 @@ def main(args):
             idx = []
             for i in range(len(stages)):
                 if stages[i] == target_stage:
-                    # print(stages[i], target_stage)
                     idx.append(i)
 
-        # Get the indices of the frames where the stage is 1
+        ep_len = len(idx)
 
-        cubeA_pos = obs[0]['cubeA_pos']
-        cubeB_pos = obs[0]['cubeB_pos']
+        obs_data = rollouts['observations'][:ep_len]
+        action_data = rollouts['actions'][:ep_len]
+        stages = rollouts['stage'][:ep_len]
+        target_stage = task_config['stage']
 
-        cubeA_rotm = R.from_quat(obs[0]['cubeA_quat']).as_matrix()
-        cubeB_rotm = R.from_quat(obs[0]['cubeB_quat']).as_matrix()
+        padding_mask = np.zeros((max_timesteps,), dtype=bool)
+        padding_mask[:ep_len] = True
+        action_data += [action_data[-1]] * (num_queries)
+
+        cubeA_pos = obs_data[0]['cubeA_pos']
+        cubeB_pos = obs_data[0]['cubeB_pos']
+
+        cubeA_rotm = R.from_quat(obs_data[0]['cubeA_quat']).as_matrix()
+        cubeB_rotm = R.from_quat(obs_data[0]['cubeB_quat']).as_matrix()
 
         cubeA_pos_GT = cubeA_pos.copy()
         cubeB_pos_GT = cubeB_pos.copy()
@@ -78,182 +85,120 @@ def main(args):
         cubeA_rotm_GT = cubeA_rotm.copy()
         cubeB_rotm_GT = cubeB_rotm.copy()
 
-        if noisy_reference: # noisify reference
-            pos_noise = np.random.uniform(-1, 1, 3) * 0.01
-            angle_noise = np.random.uniform(-1, 1, 3) * 6 / 180 * np.pi
-            cubeA_pos += pos_noise
-            cubeA_rotm = cubeA_rotm @ R.from_euler('xyz', angle_noise).as_matrix()
+        if noisy_reference:
+            if noisy_reference_type == "fixed": # noisify reference
+                pos_noise = np.random.uniform(-1, 1, 3) * 0.04
+                angle_noise = np.random.uniform(-1, 1, 3) * 24 / 180 * np.pi
+                cubeA_pos += pos_noise
+                cubeA_rotm = cubeA_rotm @ R.from_euler('xyz', angle_noise).as_matrix()
+                cubeB_pos += pos_noise
+                cubeB_rotm = cubeB_rotm @ R.from_euler('xyz', angle_noise).as_matrix()
         
 
-        ep_len = len(idx)
+
         # print(len(idx))
 
-        init_eef_pos = obs[0]['robot0_eef_pos']
-        init_eef_rotm = R.from_quat(obs[0]['robot0_eef_quat_site']).as_matrix()
+        poses_dict_buffer = {
+            "pos": [],
+            "rotm": []
+        }
 
         for j in range(ep_len):
             if j not in idx:
                 continue
 
             # Proprioceptive observations
-            eef_pos = obs[j]['robot0_eef_pos'] 
-            rotm = R.from_quat(obs[j]['robot0_eef_quat_site']).as_matrix()
-            eef_vel = obs[j]['robot0_eef_vel_body']
+            eef_pos = obs_data[j]['robot0_eef_pos'] 
+            rotm = R.from_quat(obs_data[j]['robot0_eef_quat_site']).as_matrix()
+            eef_vel = obs_data[j]['robot0_eef_vel_body']
 
+            poses_dict_buffer["pos"].append(eef_pos)
+            poses_dict_buffer["rotm"].append(rotm)
 
+            # if stages[j] == 0: use cubeA as a reference (noisy reference)
             if stages[j] == 0:
                 pd = cubeA_pos
                 Rd = cubeA_rotm
+                pd_GT = cubeA_pos_GT
+                Rd_GT = cubeA_rotm_GT
+
             else:
                 pd = cubeB_pos
                 Rd = cubeB_rotm
-            
-            
-            if state_category == "eef_pose_world":
-                eef_rotvec = R.from_matrix(rotm).as_rotvec()
-                eef_pose = np.concatenate((eef_pos, eef_rotvec))
-                state = eef_pose
+                pd_GT = cubeB_pos_GT
+                Rd_GT = cubeB_rotm_GT
 
-            elif state_category == "eef_vel":
-                state = eef_vel
+            states = []
+            actions = []
 
-            elif state_category == "GCEV":
-                if noisy_reference:
-                    if noisy_reference_type == "random":
-                        pos_noise = np.random.uniform(-1, 1, 3) * 0.02
-                        angle_noise = np.random.uniform(-1, 1, 3) * 12 / 180 * np.pi
-                        cubeA_pos = cubeA_pos_GT + pos_noise
-                        cubeA_rotm = cubeA_rotm_GT @ R.from_euler('xyz', angle_noise).as_matrix()
+            for state in state_category:
+                if state == "world_pose":
+                    state = np.concatenate((eef_pos, rotm_to_rot6d(rotm)))
+                elif state == "eef_vel":
+                    state = eef_vel
+                elif state == "GCEV":
+                    if noisy_reference:
+                        if noisy_reference_type == "random":
+                            pos_noise = np.random.uniform(-1, 1, 3) * 0.04
+                            angle_noise = np.random.uniform(-1, 1, 3) * 24 / 180 * np.pi
 
-                        pd = cubeA_pos
-                        Rd = cubeA_rotm
+                            pd = pd_GT + pos_noise
+                            Rd = Rd_GT @ R.from_euler('xyz', angle_noise).as_matrix()                    
+                    ep = rotm.T @ (eef_pos - pd)
+                    eR = vee_map(Rd.T @ rotm - rotm.T @ Rd)
 
-                    elif noisy_reference_type == "fixed":
-                        pass
+                    state = np.concatenate((ep, eR))
 
-                    else:
-                        raise ValueError("noisy_reference_type must be 'random' or 'fixed'")
-                else:
-                    pass
+                states.append(state)
+
+
+
+            for action in action_category:
+                if action == "world_pose":
+                    action = np.zeros((num_queries, 9))
+                    for k in range(num_queries):
+                        action[k, :3] = action_data[j+k][:3]
+                        action[k, 3:] = rotvec_to_rot6d(action_data[j+k][3:6])
+
+                elif action == "relative":
+                    action = np.zeros((num_queries, 6))
+                    for k in range(num_queries):
+                        g_a = np.eye(4)
+                        g_a[:3,3] = action_data[j+k][:3]
+                        g_a[:3,:3] = R.from_rotvec(action_data[j+k][3:6]).as_matrix()
+
+                        g = np.eye(4)
+                        g[:3,3] = eef_pos
+                        g[:3,:3] = rotm
+                        g_rel = np.linalg.inv(g) @ g_a
+                        action[k, :3] = g_rel[:3, 3]
+                        action[k, 3:] = R.from_matrix(g_rel[:3, :3]).as_rotvec()
                 
-                ep = rotm.T @ (eef_pos - pd)
-                eR = vee_map(Rd.T @ rotm - rotm.T @ Rd)
+                elif action == "gripper":
+                    action = np.zeros((num_queries, 1))
+                    for k in range(num_queries):
+                        action[k, 0] = action_data[j+k][6]
+                    
+                actions.append(action)
 
-                state = np.concatenate((ep, eR))
+            processed_states = np.concatenate(states, axis=0)
+            assert processed_states.shape == (state_dim,), f"State shape mismatch: {processed_states.shape} != {(state_dim,)}"
 
-            elif state_category == "relative_init":
-                g_i = np.eye(4)
-                g_i[:3, 3] = init_eef_pos
-                g_i[:3, :3] = init_eef_rotm
+            processed_action = np.concatenate(actions, axis=1)
+            assert processed_action.shape == (num_queries, action_dim), f"Action shape mismatch: {processed_action.shape} != {(num_queries, action_dim)}"
 
-                g = np.eye(4)
-                g[:3, 3] = eef_pos
-                g[:3, :3] = rotm
+            current_padding_mask = padding_mask[j:j + num_queries]
 
-                g_rel = np.linalg.inv(g_i) @ g
+            data_dict['/observations/state'].append(processed_states)
+            data_dict['/action'].append(processed_action)
+            data_dict['/is_padded'].append(current_padding_mask)
 
-                state = np.zeros(6)
-                state[0:3] = g_rel[:3, 3]
-                state[3:6] = R.from_matrix(g_rel[:3, :3]).as_rotvec()
-
-
-            if action_category == "eef_pose_world":
-                action = actions[j]
-
-            elif action_category == "relative":
-                g = np.eye(4)
-                g[:3, 3] = eef_pos
-                g[:3, :3] = rotm
-
-                g_a = np.eye(4)
-                g_a[:3, 3] = actions[j][:3]
-                g_a[:3, :3] = R.from_rotvec(actions[j][3:6]).as_matrix()
-
-                g_rel = np.linalg.inv(g) @ g_a
-
-                action = np.zeros(7)
-                action[0:3] = g_rel[:3, 3]
-                action[3:6] = R.from_matrix(g_rel[:3, :3]).as_rotvec()
-
-                # gripper action
-                action[-1] = actions[j][-1]
-
-            elif action_category == "relative_init":
-                g_i = np.eye(4)
-                g_i[:3, 3] = init_eef_pos
-                g_i[:3, :3] = init_eef_rotm
-
-                g_a = np.eye(4)
-                g_a[:3, 3] = actions[j][:3]
-                g_a[:3, :3] = R.from_rotvec(actions[j][3:6]).as_matrix()
-
-                g_rel = np.linalg.inv(g_i) @ g_a
-
-                action = np.zeros(7)
-                action[0:3] = g_rel[:3, 3]
-                action[3:6] = R.from_matrix(g_rel[:3, :3]).as_rotvec()
-
-                # gripper action
-                action[-1] = actions[j][-1]
-
-            elif action_category == "desired_frame":
-                gd = np.eye(4)
-                gd[:3, 3] = pd
-                gd[:3, :3] = Rd
-
-                g_a = np.eye(4)
-                g_a[:3, 3] = actions[j][:3]
-                g_a[:3, :3] = R.from_rotvec(actions[j][3:6]).as_matrix()
-
-                g_rel = np.linalg.inv(gd) @ g_a
-
-                action = np.zeros(7)
-                action[0:3] = g_rel[:3, 3]
-                action[3:6] = R.from_matrix(g_rel[:3, :3]).as_rotvec()
-
-                # gripper action
-                action[-1] = actions[j][-1]
-
-            elif action_category == "desired_frame_correction":
-                gd = np.eye(4)
-                gd[:3, 3] = cubeA_pos_GT
-                gd[:3, :3] = cubeA_rotm_GT
-
-                g_a = np.eye(4)
-                g_a[:3, 3] = actions[j][:3]
-                g_a[:3, :3] = R.from_rotvec(actions[j][3:6]).as_matrix()
-
-                g_rel = np.linalg.inv(gd) @ g_a
-
-                action = np.zeros(7)
-                action[0:3] = g_rel[:3, 3]
-                action[3:6] = R.from_matrix(g_rel[:3, :3]).as_rotvec()
-
-                # gripper action
-                action[-1] = actions[j][-1]
-
-
-            data_dict['/observations/state'].append(state)
-            # data_dict['/observations/eef_vel'].append(obs[j]['eef_vel'])
-            data_dict['/action'].append(action)
             for cam_name in camera_names:
                 data_dict[f'/observations/images/{cam_name}'].append(obs[j][f"{cam_name}_image"])
 
-        pad_len = max_timesteps - ep_len
-
-        if pad_len > 0:
-            # Pad state and action
-            last_state = data_dict['/observations/state'][-1]
-            last_action = data_dict['/action'][-1]
-            data_dict['/observations/state'] += [last_state.copy()] * pad_len
-            data_dict['/action'] += [last_action.copy()] * pad_len
-
-            # Pad images
-            for cam_name in camera_names:
-                last_image = data_dict[f'/observations/images/{cam_name}'][-1]
-                data_dict[f'/observations/images/{cam_name}'] += [last_image] * pad_len
-
-
+        for key, seq in data_dict.items():
+            while len(seq) < ep_len:
+                seq.append(seq[-1])
 
         tic = time.time()
  
@@ -270,8 +215,9 @@ def main(args):
                                          chunks=(1, 256, 256, 3), )
             # compression='gzip',compression_opts=2,)
             # compression=32001, compression_opts=(0, 0, 0, 0, 9, 1, 1), shuffle=False)
-            eef_pos = obs.create_dataset('state', (max_timesteps, state.shape[0]))
-            action = root.create_dataset('action', (max_timesteps, action.shape[0]))
+            state_ = obs.create_dataset('state', (max_timesteps, state_dim))
+            action_ = root.create_dataset('action', (max_timesteps, num_queries, action_dim))
+            is_padded = root.create_dataset('is_padded', (max_timesteps, num_queries), dtype=bool)
 
             for name, array in data_dict.items():
                 root[name][...] = array       
@@ -282,7 +228,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--algorithm", type=str, default="ACT")
-    parser.add_argument("--config_file", type=str, default="config/train/ACT_stack.yaml")
+    parser.add_argument("--config_file", type=str, default="config/train/ACT_stack_08.yaml")
 
     args = parser.parse_args()
 
