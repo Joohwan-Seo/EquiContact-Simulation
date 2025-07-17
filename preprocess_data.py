@@ -39,6 +39,7 @@ def main(args):
     camera_names = task_config['camera_names']
 
     for episode_idx in range(num_episodes):
+        tic = time.time()
         with open(f"{dataset_dir}/demo_{episode_idx+1}.pkl", 'rb') as f:
             rollouts = pickle.load(f)
 
@@ -49,6 +50,8 @@ def main(args):
         }
         for cam_name in camera_names:
             data_dict[f'/observations/images/{cam_name}'] = []
+
+        stages = rollouts['stage']
 
         # Get the indices of the frames where the stage is target_stage
         if target_stage == ("whole" or "Whole"):
@@ -131,12 +134,12 @@ def main(args):
             states = []
             actions = []
 
-            for state in state_category:
-                if state == "world_pose":
+            for state_name in state_category:
+                if state_name == "world_pose":
                     state = np.concatenate((eef_pos, rotm_to_rot6d(rotm)))
-                elif state == "eef_vel":
+                elif state_name == "eef_vel":
                     state = eef_vel
-                elif state == "GCEV":
+                elif state_name == "GCEV":
                     if noisy_reference:
                         if noisy_reference_type == "random":
                             pos_noise = np.random.uniform(-1, 1, 3) * 0.04
@@ -153,14 +156,14 @@ def main(args):
 
 
 
-            for action in action_category:
-                if action == "world_pose":
+            for action_name in action_category:
+                if action_name == "world_pose":
                     action = np.zeros((num_queries, 9))
                     for k in range(num_queries):
                         action[k, :3] = action_data[j+k][:3]
                         action[k, 3:] = rotvec_to_rot6d(action_data[j+k][3:6])
 
-                elif action == "relative":
+                elif action_name == "relative":
                     action = np.zeros((num_queries, 6))
                     for k in range(num_queries):
                         g_a = np.eye(4)
@@ -174,7 +177,7 @@ def main(args):
                         action[k, :3] = g_rel[:3, 3]
                         action[k, 3:] = R.from_matrix(g_rel[:3, :3]).as_rotvec()
                 
-                elif action == "gripper":
+                elif action_name == "gripper":
                     action = np.zeros((num_queries, 1))
                     for k in range(num_queries):
                         action[k, 0] = action_data[j+k][6]
@@ -194,13 +197,11 @@ def main(args):
             data_dict['/is_padded'].append(current_padding_mask)
 
             for cam_name in camera_names:
-                data_dict[f'/observations/images/{cam_name}'].append(obs[j][f"{cam_name}_image"])
+                data_dict[f'/observations/images/{cam_name}'].append(obs_data[j][f"{cam_name}_image"])
 
         for key, seq in data_dict.items():
-            while len(seq) < ep_len:
+            while len(seq) < max_timesteps:
                 seq.append(seq[-1])
-
-        tic = time.time()
  
         dir = processed_dataset_dir
         if not os.path.exists(dir):

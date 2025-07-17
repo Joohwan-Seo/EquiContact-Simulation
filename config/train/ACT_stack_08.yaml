@@ -22,7 +22,7 @@ task_parameters:
   camera_names: ["robot0_eye_in_hand", "robot0_eye_in_hand_back"] # To be contained in the processed dataset
   stage: 0
   state_category: ["GCEV"]
-  action_category: ["relative_fixed", "gripper"]
+  action_category: ["relative", "gripper"]
   state_dim : 6
   action_dim : 7
   noisy_reference : True
@@ -36,7 +36,7 @@ eval_parameters:
   camera_names: ["robot0_eye_in_hand", "robot0_eye_in_hand_back"] # To be contained in the processed dataset
   stage: 0
   state_category: ["GCEV"]
-  action_category: ["relative_fixed", "gripper"]
+  action_category: ["relative", "gripper"]
   state_dim : 6
   action_dim : 7
   noisy_reference : True

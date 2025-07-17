@@ -19,7 +19,7 @@ import robosuite
 import robosuite.macros as macros
 macros.IMAGE_CONVENTION = "opencv"
 from robosuite.controllers import load_composite_controller_config
-from transform_utils import hat_map, vee_map
+from transform_utils import *
 from scipy.linalg import expm
 # from data_collection.scripted_policy.policy_player_stack import PolicyPlayerStack
 
@@ -303,8 +303,6 @@ class EvalEnv():
         self.eef_pos = self.robot0_base_ori_rotm.T @ (obs['robot0_eef_pos'] - self.robot0_base_pos)
         self.eef_rotm = self.robot0_base_ori_rotm.T @ R.from_quat(obs['robot0_eef_quat_site']).as_matrix()
 
-        self.eef_rotvec = R.from_matrix(self.eef_rotm).as_rotvec()
-
         name = "gripper0_right_grip_site"
         N_dof = self.env.robots[0].init_qpos.shape[0]
         
@@ -319,8 +317,6 @@ class EvalEnv():
 
         eef_vel_body = J_body @ obs['robot0_joint_vel']
 
-        eef_pose = np.concatenate((self.eef_pos, self.eef_rotvec))
-
         imgs = []
         for cam_name in camera_names:
             img = rearrange(obs[f"{cam_name}_image"], 'h w c -> c h w')
@@ -328,139 +324,54 @@ class EvalEnv():
         
         img_stack = np.stack(imgs, axis=0)
 
-        if state_category == "eef_pose_world":
+        states = []
 
-            state = eef_pose
+        self.current_pose = np.eye(4)
+        self.current_pose[:3,3] = self.eef_pos
+        self.current_pose[:3,:3] = self.eef_rotm
 
-        elif state_category == "relative_init":
-            # if self has init pos attribute
-            if self.reset_flag:
-                self.init_eef_pos = self.eef_pos
-                self.init_eef_rotm = self.eef_rotm
-                self.reset_flag = False
-            
-            g_i = np.eye(4)
-            g_i[:3, 3] = self.init_eef_pos
-            g_i[:3, :3] = self.init_eef_rotm
+        for state_name in state_category:
 
-            g = np.eye(4)
-            g[:3, 3] = self.eef_pos
-            g[:3, :3] = self.eef_rotm
+            if state_name == "world_pose":
+                state = np.concatenate((self.eef_pos, rotm_to_rot6d(self.eef_rotm)))
 
-            g_rel = np.linalg.inv(g_i) @ g
+            elif state_name == "GCEV":
+                pd = self.pos_cubeA_noise
+                Rd = self.rotm_cubeA_noise
 
-            state = np.zeros(6)
-            state[0:3] = g_rel[:3, 3]
-            state[3:6] = R.from_matrix(g_rel[:3, :3]).as_rotvec()
+                ep = self.eef_rotm.T @ (self.eef_pos - pd)
+                eR = self.vee_map(Rd.T @ self.eef_rotm - self.eef_rotm.T @ Rd)
 
-        elif state_category == "GCEV":
-            pd = self.pos_cubeA_noise
-            Rd = self.rotm_cubeA_noise
+                state = np.concatenate((ep, eR))
 
-            ep = self.eef_rotm.T @ (self.eef_pos - pd)
-            eR = self.vee_map(Rd.T @ self.eef_rotm - self.eef_rotm.T @ Rd)
+            elif state_category == "eef_vel":
+                state = eef_vel_body
 
-            state = np.concatenate((ep, eR))
+            states.append(state)
+        
+        states = np.concatenate(states, axis=0)
 
-
-        elif state_category == "eef_vel":
-            state = eef_vel_body
-
-        return state, img_stack
+        return states, img_stack
 
     def process_action(self, action):
         action_category = self.config['action_category']
 
-        if action_category == "eef_pose_world":
-            action_return = action
+        actions = []
 
-        elif action_category == "relative_fixed":
-            g = np.eye(4)
-            g[:3, 3] = self.eef_pos
-            g[:3, :3] = self.eef_rotm
+        all_actions_poses = np.zeros((self.num_queries, 4, 4))
+        all_gripper_actions = np.ones((self.num_queries, 1))
 
-            g_actions_mat = np.zeros((action.shape[0], 4, 4))
-            g_actions_mat[0, :4, :4] = g
+        for action_name in action_category:
+            if action_name == "world_pose":
+                all_actions_poses = batch_rot6d_pose_to_hom_matrices(action[:, 0:9])
+            
+            elif action_name == "relative":
+                all_actions_poses = np.expand_dims(self.current_pose, axis=0) @ batch_pose_to_hom_matrices(action[:, 0:6])
 
-            # action_cumsum = np.cumsum(action[:, :6], axis=0)
-            # print("relative_fixed action shape", action.shape)
+            elif action_name == "gripper":
+                all_gripper_actions = action[:, -1].reshape((-1, 1))
 
-            for i in range(action.shape[0]):
-                g_rel = np.eye(4)
-                g_rel[:3, 3] = action[i, 0:3]
-                g_rel[:3, :3] = R.from_rotvec(action[i, 3:6]).as_matrix()
-                g_actions_mat[i, :4, :4] = g @ g_rel
-                # g_actions_mat[i+1, :4, :4] = g_actions_mat[0, :4, :4] @ expm(hat_map(action_cumsum[i, :6]) * self.dt) 
-
-
-            # print(f"g_actions_mat, determinants: {np.linalg.det(g_actions_mat[:, :3,:3])}")
-
-            # return the action in SE(3) form
-            return g_actions_mat
-        
-        elif action_category == "relative":
-            g = np.eye(4)
-            g[:3, 3] = self.eef_pos
-            g[:3, :3] = self.eef_rotm
-
-            g_rel = np.eye(4)
-            g_rel[:3, 3] = action[0:3]
-            g_rel[:3, :3] = R.from_rotvec(action[3:6]).as_matrix()
-
-            g_a = g @ g_rel
-
-            action_return = np.zeros(7)
-            action_return[0:3] = g_a[:3, 3]
-            action_return[3:6] = R.from_matrix(g_a[:3, :3]).as_rotvec()
-            # gripper action
-            action_return[-1] = action[-1]
-
-        elif action_category == "desired_frame" or action_category == "desired_frame_correction":
-
-
-            # cubeA_pos = self.pos_cubeA_GT
-            # cubeA_rotm = self.rotm_cubeA_GT
-
-            cubeA_pos = self.pos_cubeA_noise
-            cubeA_rotm = self.rotm_cubeA_noise
-
-            gd = np.eye(4)
-            gd[:3, 3] = cubeA_pos
-            gd[:3, :3] = cubeA_rotm
-
-            # print(f"cubeA_pos: {cubeA_pos}, cubeA_rotm: {cubeA_rotm}")
-
-            g_rel = np.eye(4)
-            g_rel[:3, 3] = action[0:3]
-            g_rel[:3, :3] = R.from_rotvec(action[3:6]).as_matrix()
-
-            g_a = gd @ g_rel
-
-            action_return = np.zeros(7)
-            action_return[0:3] = g_a[:3, 3]
-            action_return[3:6] = R.from_matrix(g_a[:3, :3]).as_rotvec()
-            # gripper action
-            action_return[-1] = action[-1]
-
-        elif action_category == "relative_init":
-            g_i = np.eye(4)
-            g_i[:3, 3] = self.init_eef_pos
-            g_i[:3, :3] = self.init_eef_rotm
-
-            g_rel = np.eye(4)
-            g_rel[:3, 3] = action[0:3]
-            g_rel[:3, :3] = R.from_rotvec(action[3:6]).as_matrix()
-
-            g_a = g_i @ g_rel
-
-            action_return = np.zeros(7)
-            action_return[0:3] = g_a[:3, 3]
-            action_return[3:6] = R.from_matrix(g_a[:3, :3]).as_rotvec()
-
-            # gripper action
-            action_return[-1] = action[-1]
-
-        return action_return
+        return all_actions_poses, all_gripper_actions
 
     def eval_bc(self):
         state_dim = self.config['state_dim']
@@ -475,6 +386,7 @@ class EvalEnv():
         temporal_agg = True
         query_frequency = 1
         num_queries = policy_config['num_queries']
+        self.num_queries = num_queries
 
         max_timesteps = int(max_timesteps * 1) # may increase for real-world tasks
 
@@ -495,12 +407,8 @@ class EvalEnv():
 
             ### evaluation loop
             if temporal_agg:
-                if self.action_category == "relative_fixed":
-                    all_time_actions_np = np.zeros([max_timesteps, max_timesteps+num_queries, 4,4])
-                    all_time_grasp_np = np.zeros([max_timesteps, max_timesteps+num_queries, 1])
-
-                else:
-                    all_time_actions = np.zeros([max_timesteps, max_timesteps+num_queries, action_dim])
+                all_time_poses = np.zeros([max_timesteps, max_timesteps+num_queries, 4,4])
+                all_time_grasp = np.zeros([max_timesteps, max_timesteps+num_queries, 1])
 
             state_history = torch.zeros((1, max_timesteps, state_dim)).cuda()
             image_list = [] # for visualization
@@ -524,95 +432,55 @@ class EvalEnv():
                     curr_image = torch.from_numpy(curr_image / 255.0).float().cuda().unsqueeze(0)
 
                     ### query policy
-                    if self.action_category == "relative_fixed":
-                        if self.config['policy_class'] == "ACT":
-                            if t % query_frequency == 0:
-                                all_actions = self.policy(state, curr_image).squeeze(0).cpu().numpy()
-                                unnormalized_actions = self.post_process(all_actions)
-                                all_actions_pose = self.process_action(unnormalized_actions)                                
-                                
-                            if temporal_agg:  
-                                all_time_actions_np[[t], t:t+num_queries] = all_actions_pose
-                                actions_for_curr_step = all_time_actions_np[:, t]
+                    if self.config['policy_class'] == "ACT":
+                        if t % query_frequency == 0:
+                            all_actions = self.policy(state, curr_image).squeeze(0).cpu().numpy()
+                            unnormalized_actions = self.post_process(all_actions)
+                            all_actions_pose, all_gripper_actions = self.process_action(unnormalized_actions)                                
+                            
+                        if temporal_agg:  
+                            all_time_poses[[t], t:t+num_queries] = all_actions_pose
+                            poses_for_curr_step = all_time_poses[:, t]
+                            poses_populated = (np.linalg.det(poses_for_curr_step[:,:3,:3]) != 0)
+                            # print(actions_for_curr_step.shape)
+                            poses_for_curr_step = poses_for_curr_step[poses_populated]
 
-                                # print(np.linalg.det(actions_for_curr_step[:,:3,:3]))
+                            all_time_grasp[[t], t:t+num_queries] = unnormalized_actions[:, -1].reshape((-1,1))
+                            # print(unnormalized_actions[:, -1].shape)
+                            grasp_for_curr_step = all_time_grasp[:, t]
+                            grasp_populated = (grasp_for_curr_step != 0)
+                            grasp_for_curr_step = grasp_for_curr_step[grasp_populated]
+                            
 
-                                actions_populated = (np.linalg.det(actions_for_curr_step[:,:3,:3]) != 0)
-                                # print(actions_for_curr_step.shape)
-                                actions_for_curr_step = actions_for_curr_step[actions_populated]
+                            k = 0.01
+                            exp_weights = np.exp(-k * np.arange(len(poses_for_curr_step)))
+                            exp_weights = exp_weights / exp_weights.sum()
+                            
+                            translation = (poses_for_curr_step[:, :3, 3] * exp_weights.reshape((-1,1))).sum(axis=0, keepdims=True)
+                            rotation_object = R.from_matrix(poses_for_curr_step[:, :3, :3])
+                            rotation = rotation_object.mean(weights = exp_weights)
 
-                                #TODO I need to fix this
-                                # print(actions_for_curr_step.shape, actions_for_curr_step.reshape((-1, 4, 4)).shape)
+                            grasp = (grasp_for_curr_step * exp_weights).sum(axis=0, keepdims=True)
 
-                                all_time_grasp_np[[t], t:t+num_queries] = unnormalized_actions[:, -1].reshape((-1,1))
-                                # print(unnormalized_actions[:, -1].shape)
-                                grasp_for_curr_step = all_time_grasp_np[:, t]
-                                grasp_populated = (grasp_for_curr_step != 0)
-                                grasp_for_curr_step = grasp_for_curr_step[grasp_populated]
-                                
-                                # print(actions_populated.sum(), grasp_populated.sum())
+                            # print(grasp.shape)
 
-                                k = 0.01
-                                exp_weights = np.exp(-k * np.arange(len(actions_for_curr_step)))
-                                exp_weights = exp_weights / exp_weights.sum()
-                                
-                                translation = (actions_for_curr_step[:, :3, 3] * exp_weights.reshape((-1,1))).sum(axis=0, keepdims=True)
-                                rotation_object = R.from_matrix(actions_for_curr_step[:, :3, :3])
-                                rotation = rotation_object.mean(weights = exp_weights)
-
-                                grasp = (grasp_for_curr_step * exp_weights).sum(axis=0, keepdims=True)
-
-                                # print(grasp.shape)
-
-                                action = np.zeros((7,))
-                                action[0:3] = translation
-                                action[3:6] = rotation.as_rotvec()
-                                action[-1] = grasp[0]                              
-                            else:
-                                action_pose = all_actions_pose[:, t % query_frequency]
-                                action = np.zeros((7,))
-                                action[0:3] = action_pose[:3,3]
-                                action[3:6] = R.from_matrix(action_pose[:3,:3]).as_rotvec()
-                                action[-1] = unnormalized_actions[:, t % query_frequency][-1]
-                                
-                        elif self.config['policy_class'] == "CNNMLP":
-                            raw_action = self.policy(state, curr_image)
+                            action = np.zeros((7,))
+                            action[0:3] = translation
+                            action[3:6] = rotation.as_rotvec()
+                            action[-1] = grasp[0]                              
                         else:
-                            raise NotImplementedError
-                        
+                            action_pose = all_actions_pose[:, t % query_frequency]
+                            action = np.zeros((7,))
+                            action[0:3] = action_pose[:3,3]
+                            action[3:6] = R.from_matrix(action_pose[:3,:3]).as_rotvec()
+                            action[-1] = unnormalized_actions[:, t % query_frequency][-1]
+                            
+                    elif self.config['policy_class'] == "CNNMLP":
+                        raw_action = self.policy(state, curr_image)
                     else:
-                        if self.config['policy_class'] == "ACT":
-                            if t % query_frequency == 0:
-                                all_actions = self.policy(state, curr_image)
-                                all_actions = all_actions.squeeze(0).cpu().numpy()
-                                unnormalized_actions = self.post_process(all_actions)
-                            if temporal_agg:
-                                # print("using temporal aggregation")
-                                all_time_actions[[t], t:t+num_queries] = unnormalized_actions
-                                actions_for_curr_step = all_time_actions[:, t]
-                                actions_populated = np.all(actions_for_curr_step != 0, axis=1)
-                                actions_for_curr_step = actions_for_curr_step[actions_populated]
-                                k = 0.01
-                                exp_weights = np.exp(-k * np.arange(len(actions_for_curr_step)))
-                                exp_weights = exp_weights / exp_weights.sum()
-                                exp_weights = exp_weights.reshape((-1,1))
-                                action = (actions_for_curr_step * exp_weights).sum(axis=0, keepdims=True)
-                            else:
-                                action = unnormalized_actions[:, t % query_frequency]
-                        elif self.config['policy_class'] == "CNNMLP":
-                            raw_action = self.policy(state, curr_image)
-                            action = self.post_process(raw_action.squeeze(0).cpu.numpy())
-                        else:
-                            raise NotImplementedError
-
-                        ### post-process actions
-                        # raw_action = raw_action.squeeze(0).cpu().numpy()
-                        # action = self.post_process(raw_action)
-
-                        if action.shape == (1, action_dim):
-                            action = action.squeeze(0)
-
-                        action = self.process_action(action)
+                        raise NotImplementedError
+                        
+                   
                     
                     ### step the environment
                     obs, reward, done, info = self.env.step(action)
